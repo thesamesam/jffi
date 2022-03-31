@@ -18,14 +18,14 @@ jobs:
     strategy:
       matrix:
         arch:
-          - "386"
+          #- "386"
           - amd64
-          - arm
-          - arm64
-          - linux-arm-v5
+          #- arm
+          #- arm64
+          #- linux-arm-v5
           # Commented out until https://github.com/multiarch/qemu-user-static/issues/128 is fixed
           #- ppc64le
-          - s390x
+          #- s390x
 
     name: Linux binary ${{ matrix.arch }}
 
@@ -42,11 +42,11 @@ jobs:
       - name: Update System
         run: sudo apt-get update -y
       - name: Install qemu
-        run: sudo apt-get install -y --no-install-recommends qemu-user-static
+        run: sudo apt-install qemu -y
       - name: Experimental Docker
-        run: sudo cp .github/experimental-docker.json /etc/docker/daemon.json
+        run: cp .github/experimental-docker.json /etc/docker/daemon.json
       - name: Restart Docker
-        run: sudo systemctl restart docker.service
+        run: systemctl restart docker.service
       - name: Pull docker image
         run: docker pull --platform $(echo ${{ matrix.arch }} | sed 's|-|/|g') debian:10 || true
       - name: Build inside Docker
@@ -62,3 +62,81 @@ jobs:
           name: jar-${{ matrix.arch }}
           path: archive/*.jar
 
+  native-gentoo:
+
+    # Switch back to ubuntu-latest after that maps to 20.04
+    runs-on: ubuntu-20.04
+
+    strategy:
+      matrix:
+        arch:
+          - ppc64le
+        # TODO: fold in Ubuntu to the same thing?
+        distro: ['gentoo/stage3:systemd']
+
+    container:
+      image: ${{ matrix.distro }}
+
+    # We need Gentoo for now to easily get newest QEMU to work around a bug
+    name: Linux binary (Gentoo) ${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: cache dependencies
+        uses: actions/cache@v1
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+      - uses: satackey/action-docker-layer-caching@v0.0.11
+        continue-on-error: true
+      - name: Update repositories
+        run: emerge --sync --quiet
+      - name: Configure system
+        run: |
+          # Disable bits which don't work within Docker.
+          echo 'FEATURES="-ipc-sandbox -pid-sandbox -network-sandbox -usersandbox -mount-sandbox -sandbox"' >> /etc/portage/make.conf
+          # Speed things up a bit.
+          echo 'FEATURES="${FEATURES} parallel-install parallel-fetch -merge-sync"' >> /etc/portage/make.conf
+          # TODO: May be able to drop this once changed to desktop docker images?
+          # https://dilfridge.blogspot.com/2021/09/experimental-binary-gentoo-package.html
+          echo -e "[binhost]\npriority = 9999\nsync-uri = https://gentoo.osuosl.org/experimental/amd64/binpkg/default/linux/17.1/x86-64/\n" >> /etc/portage/binrepos.conf
+          echo 'EMERGE_DEFAULT_OPTS="--binpkg-respect-use=n --getbinpkg=y --autounmask-write --autounmask-continue --autounmask-keep-keywords=y --autounmask-use=y"' >> /etc/portage/make.conf
+          # Avoid some deps
+          echo "dev-vcs/git -perl" > /etc/portage/package.use/git
+      - name: Install qemu
+        run: |
+          echo "app-emulation/qemu **" > /etc/portage/package.accept_keywords/qemu
+          echo "app-emulation/qemu QEMU_USER_TARGETS: ppc64le ppc ppc64" > /etc/portage/package.use/qemu
+          # Hack to avoid patch which doesn't apply to git right now
+          sed -i -e '/also-build-virtfs-proxy-helper.patch/d' /var/db/repos/gentoo/app-emulation/qemu/qemu-9999.ebuild
+          # Drop removed (renamed?) configure options from git
+          sed -i -e '/xfsctl/d' /var/db/repos/gentoo/app-emulation/qemu/qemu-9999.ebuild
+          sed -i -e 's/conf_opts+=( --disable-libxml2 )/:;/' /var/db/repos/gentoo/app-emulation/qemu/qemu-9999.ebuild
+          sed -i -e 's/conf_opts+=( --enable-libxml2 )/:;/' /var/db/repos/gentoo/app-emulation/qemu/qemu-9999.ebuild
+          ebuild /var/db/repos/gentoo/app-emulation/qemu/qemu-9999.ebuild clean digest
+          # Install it!
+          USE="-doc -jpeg -png -oss -vnc" emerge --quiet --quiet-build=y app-emulation/qemu
+      - name: Install Docker
+        run: |
+          emerge --quiet --quiet-build=y app-containers/docker app-containers/docker-cli
+      - name: Experimental Docker
+        run: |
+          mkdir /etc/docker
+          cp .github/experimental-docker.json /etc/docker/daemon.json
+      - name: Restart Docker
+        run: systemctl restart docker.service
+      - name: Pull docker image
+        run: docker pull --platform $(echo ${{ matrix.arch }} | sed 's|-|/|g') debian:10 || true
+      - name: Build inside Docker
+        run: docker run --rm -v $GITHUB_WORKSPACE:/work debian:10 /work/.github/build-native-debian.sh
+      - name: Archive built library
+        uses: actions/upload-artifact@v2
+        with:
+          name: shared-object-${{ matrix.arch }}
+          path: build/jni/*.so
+      - name: Archive built jar
+        uses: actions/upload-artifact@v2
+        with:
+          name: jar-${{ matrix.arch }}
+          path: archive/*.jar
