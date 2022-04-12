@@ -40,9 +40,9 @@ jobs:
       - uses: satackey/action-docker-layer-caching@v0.0.11
         continue-on-error: true
       - name: Update System
-        run: sudo apt-get update -y
+        run: apt-get update -y
       - name: Install qemu
-        run: sudo apt-install qemu -y
+        run: apt install qemu -y
       - name: Experimental Docker
         run: cp .github/experimental-docker.json /etc/docker/daemon.json
       - name: Restart Docker
@@ -72,10 +72,11 @@ jobs:
         arch:
           - ppc64le
         # TODO: fold in Ubuntu to the same thing?
-        distro: ['gentoo/stage3:systemd']
+        distro: ['gentoo/stage3:latest']
 
     container:
       image: ${{ matrix.distro }}
+      options: --privileged --pid=host
 
     # We need Gentoo for now to easily get newest QEMU to work around a bug
     name: Linux binary (Gentoo) ${{ matrix.arch }}
@@ -107,7 +108,8 @@ jobs:
       - name: Install qemu
         run: |
           echo "app-emulation/qemu **" > /etc/portage/package.accept_keywords/qemu
-          echo "app-emulation/qemu QEMU_USER_TARGETS: ppc64le ppc ppc64" > /etc/portage/package.use/qemu
+          echo "app-emulation/qemu static-user" >> /etc/portage/package.use/qemu
+          echo "app-emulation/qemu QEMU_USER_TARGETS: ppc64le ppc ppc64" >> /etc/portage/package.use/qemu
           # Hack to avoid patch which doesn't apply to git right now
           sed -i -e '/also-build-virtfs-proxy-helper.patch/d' /var/db/repos/gentoo/app-emulation/qemu/qemu-9999.ebuild
           # Drop removed (renamed?) configure options from git
@@ -125,7 +127,17 @@ jobs:
           mkdir /etc/docker
           cp .github/experimental-docker.json /etc/docker/daemon.json
       - name: Restart Docker
-        run: systemctl restart docker.service
+        run: |
+          mkdir -p /lib64/rc/init.d
+          ln -s /lib64/rc/init.d /run/openrc
+          touch /run/openrc/softlevel
+          echo 'rc_sys="prefix"' >> /etc/rc.conf
+          echo 'rc_controller_cgroups="NO"' >> /etc/rc.conf
+          echo 'rc_depend_strict="NO"' >> /etc/rc.conf
+          echo 'rc_need="!net !dev !udev-mount !sysfs !checkfs !fsck !netmount !logger !clock !modules"' >> /etc/rc.conf
+          echo ':ppc64:M::\x7fELF\x02\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x15:\xff\xff\xff\xff\xff\xff\xff\xfc\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff:/usr/bin/qemu-ppc64:' > /proc/sys/fs/binfmt_misc/register
+          rc-update --update
+          /etc/init.d/docker start
       - name: Pull docker image
         run: docker pull --platform $(echo ${{ matrix.arch }} | sed 's|-|/|g') debian:10 || true
       - name: Build inside Docker
